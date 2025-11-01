@@ -110,7 +110,40 @@ if start_btn:
     if not uploaded:
         st.warning("Wgraj najpierw CSV z kolumnami page_url i target.")
     else:
-        df = pd.read_csv(uploaded)
+        # Wczytywanie pliku - obsługa CSV/XLSX, różnych separatorów i kodowań
+from io import StringIO
+
+df = None
+if uploaded.name.lower().endswith((".xlsx", ".xls")):
+    try:
+        df = pd.read_excel(uploaded)
+    except Exception as e:
+        st.error(f"Nie udało się odczytać XLSX: {e}")
+else:
+    try:
+        uploaded.seek(0)
+        raw = uploaded.read()
+        text = raw.decode("utf-8", errors="ignore")
+        for sep in [",", ";", "	", "|"]:
+            try:
+                tmp = pd.read_csv(StringIO(text), sep=sep)
+                if {"page_url", "target"}.issubset(set([c.strip() for c in tmp.columns])):
+                    df = tmp
+                    break
+            except Exception:
+                continue
+        if df is None:
+            try:
+                tmp = pd.read_csv(StringIO(text), sep=None, engine="python")
+                if {"page_url", "target"}.issubset(set([c.strip() for c in tmp.columns])):
+                    df = tmp
+            except Exception:
+                pass
+    except Exception as e:
+        st.error(f"Nie udało się wczytać CSV: {e}")
+
+if df is None:
+    st.stop()  # przerwij dalsze wykonanie, pokaż błąd wyżej
         required = {"page_url", "target"}
         if not required.issubset(set([c.strip() for c in df.columns])):
             st.error("CSV musi mieć kolumny: page_url, target")
