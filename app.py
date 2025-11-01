@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-import io
 import time
-import csv
 import random
 import re
 from urllib.parse import urlparse, urljoin
@@ -10,6 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 import streamlit as st
+from io import StringIO
 
 st.set_page_config(page_title="Dofollow Link Checker", page_icon="🔗")
 st.title("🔗 Dofollow Link Checker")
@@ -31,7 +30,7 @@ HEADERS_LIST = [
 
 def normalize_host(host: str) -> str:
     host = (host or "").lower().strip()
-    if host.startswith("http://") or host.startswith("https://"):
+    if host.startswith(("http://", "https://")):
         host = urlparse(host).netloc
     if host.startswith("www."):
         host = host[4:]
@@ -45,7 +44,8 @@ def match_target(href: str, target: str) -> bool:
     except Exception:
         return False
 
-    if target.startswith("http://") or target.startswith("https://"):
+    # Gdy target jest pełnym URL
+    if target.startswith(("http://", "https://")):
         t = urlparse(target)
         if parsed.netloc and t.netloc and normalize_host(parsed.netloc) == normalize_host(t.netloc):
             if t.path and t.path != "/":
@@ -54,6 +54,7 @@ def match_target(href: str, target: str) -> bool:
                 return True
         return False
 
+    # Gdy target to domena
     target_host = normalize_host(target)
     link_host = normalize_host(parsed.netloc) if parsed.netloc else ""
     return link_host.endswith(target_host) and link_host != ""
@@ -98,60 +99,69 @@ def safe_get(url: str):
                 time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF)-1)])
     raise last_exc
 
+# --- STAN APLIKACJI ---
+if "results_df" not in st.session_state:
+    st.session_state.results_df = None
+if "results_csv" not in st.session_state:
+    st.session_state.results_csv = None
+
 # --- INTERFEJS ---
-uploaded = st.file_uploader("📂 Wgraj CSV lub XLSX", type=["csv", "xlsx"])
-start_btn = st.button("🚀 Uruchom sprawdzanie")
+uploaded = st.file_uploader("📂 Wgraj CSV lub XLSX", type=["csv", "xlsx"], key="uploader")
+start_btn = st.button("🚀 Uruchom sprawdzanie", key="run")
 
 if start_btn:
-    if not uploaded:
-        st.warning("Wgraj najpierw plik z kolumnami page_url i target.")
-    else:
-        # Wczytywanie pliku - obsługa CSV/XLSX, różnych separatorów i kodowań
-        from io import StringIO
+    try:
+        if not uploaded:
+            st.warning("Wgraj najpierw plik z kolumnami page_url i target.")
+            st.stop()
 
+        # Wczytywanie pliku - CSV/XLSX, różne separatory
         df = None
         if uploaded.name.lower().endswith((".xlsx", ".xls")):
             try:
                 df = pd.read_excel(uploaded)
             except Exception as e:
                 st.error(f"Nie udało się odczytać XLSX: {e}")
+                st.stop()
         else:
             try:
                 uploaded.seek(0)
                 raw = uploaded.read()
                 text = raw.decode("utf-8", errors="ignore")
-
-                # Sprawdź kilka separatorów - CSV z Excela w PL zwykle ma ';'
+                # CSV z Excela w PL zwykle ma ';'
                 for sep in [",", ";", "\t", "|"]:
                     try:
                         tmp = pd.read_csv(StringIO(text), sep=sep)
-                        if {"page_url", "target"}.issubset(set([c.strip() for c in tmp.columns])):
+                        if {"page_url", "target"}.issubset({c.strip() for c in tmp.columns}):
                             df = tmp
                             break
                     except Exception:
                         continue
-
-                # Próba automatycznego wykrycia separatora
                 if df is None:
                     try:
                         tmp = pd.read_csv(StringIO(text), sep=None, engine="python")
-                        if {"page_url", "target"}.issubset(set([c.strip() for c in tmp.columns])):
+                        if {"page_url", "target"}.issubset({c.strip() for c in tmp.columns}):
                             df = tmp
                     except Exception:
                         pass
             except Exception as e:
                 st.error(f"Nie udało się wczytać CSV: {e}")
+                st.stop()
 
         if df is None:
             st.error("❌ Nie udało się wczytać pliku. Upewnij się, że ma kolumny: page_url i target.")
             st.stop()
 
         required = {"page_url", "target"}
-        if not required.issubset(set([c.strip() for c in df.columns])):
+        if not required.issubset({c.strip() for c in df.columns}):
             st.error("Plik nie ma wymaganych kolumn: page_url, target")
             st.stop()
 
         rows = df.to_dict("records")
+        if not rows:
+            st.warning("Plik nie zawiera żadnych wierszy do sprawdzenia.")
+            st.stop()
+
         results = []
         progress = st.progress(0)
         status_area = st.empty()
@@ -159,7 +169,6 @@ if start_btn:
         for i, row in enumerate(rows, 1):
             page_url = str(row.get("page_url", "")).strip()
             target = str(row.get("target", "")).strip()
-            note = ""
             try:
                 resp = safe_get(page_url)
                 final_url = resp.url
@@ -181,7 +190,6 @@ if start_btn:
                 else:
                     soup = BeautifulSoup(resp.text, "lxml")
                     page_nofollow = has_page_nofollow(soup) or x_robots_nofollow(resp.headers)
-
                     anchors = soup.find_all("a", href=True)
                     matched_links, dofollow_links = [], []
 
@@ -204,12 +212,12 @@ if start_btn:
                         "link_examples": "; ".join((dofollow_links or matched_links)[:3]),
                         "page_nofollow": page_nofollow,
                         "x_robots_nofollow": x_robots_nofollow(resp.headers),
-                        "notes": note,
+                        "notes": "",
                     })
 
                 status_area.info(f"Przetworzono {i}/{len(rows)}")
                 progress.progress(int(i/len(rows)*100))
-                time.sleep(0.5 + random.random()*0.5)
+                time.sleep(0.2 + random.random()*0.3)
             except Exception as e:
                 results.append({
                     "page_url": page_url,
@@ -225,10 +233,19 @@ if start_btn:
                 })
 
         out_df = pd.DataFrame(results)
-        st.success("✅ Gotowe. Poniżej podgląd wyników.")
-        st.dataframe(out_df, use_container_width=True)
+        st.session_state.results_df = out_df
+        st.session_state.results_csv = out_df.to_csv(index=False).encode("utf-8")
+        st.success("✅ Gotowe. Wyniki poniżej. Jeśli nic nie widzisz, przewiń w dół.")
 
-        out_csv = out_df.to_csv(index=False).encode("utf-8")
-        st.download_button("📊 Pobierz results_dofollow.csv", data=out_csv, file_name="results_dofollow.csv", mime="text/csv")
+    except Exception as e:
+        st.error(f"Niespodziewany błąd: {type(e).__name__}: {e}")
+
+# Render wyników także po rerunie aplikacji
+if st.session_state.results_df is not None:
+    st.dataframe(st.session_state.results_df, use_container_width=True)
+    st.download_button("📊 Pobierz results_dofollow.csv",
+                       data=st.session_state.results_csv,
+                       file_name="results_dofollow.csv",
+                       mime="text/csv")
 
 st.caption("Uwaga: aplikacja nie renderuje JS. Linki generowane dynamicznie mogą nie zostać wykryte. Szanuj robots.txt.")
