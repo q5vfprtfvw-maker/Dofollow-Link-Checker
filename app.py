@@ -13,11 +13,11 @@ import streamlit as st
 
 st.set_page_config(page_title="Dofollow Link Checker", page_icon="🔗")
 st.title("🔗 Dofollow Link Checker")
-st.write("Wgraj CSV z kolumnami **page_url** i **target** (domena lub pełny URL). Aplikacja sprawdzi, czy są linki dofollow.")
+st.write("Wgraj CSV lub XLSX z kolumnami **page_url** i **target** (domena lub pełny URL). Aplikacja sprawdzi, czy są linki dofollow.")
 
 # Przykładowy CSV do pobrania
 sample_csv = "page_url,target\nhttps://example.com/blog/post-1,mydomain.pl\nhttps://another-site.net/resources,https://mydomain.pl/oferta\n"
-st.download_button("Pobierz przykładowy CSV", data=sample_csv, file_name="urls_template.csv", mime="text/csv")
+st.download_button("📥 Pobierz przykładowy CSV", data=sample_csv, file_name="urls_template.csv", mime="text/csv")
 
 # Ustawienia
 TIMEOUT = 25
@@ -29,7 +29,6 @@ HEADERS_LIST = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
 ]
 
-@st.cache_data(show_spinner=False)
 def normalize_host(host: str) -> str:
     host = (host or "").lower().strip()
     if host.startswith("http://") or host.startswith("https://"):
@@ -38,7 +37,6 @@ def normalize_host(host: str) -> str:
         host = host[4:]
     return host
 
-@st.cache_data(show_spinner=False)
 def match_target(href: str, target: str) -> bool:
     if not href:
         return False
@@ -60,7 +58,6 @@ def match_target(href: str, target: str) -> bool:
     link_host = normalize_host(parsed.netloc) if parsed.netloc else ""
     return link_host.endswith(target_host) and link_host != ""
 
-@st.cache_data(show_spinner=False)
 def has_page_nofollow(soup: BeautifulSoup) -> bool:
     metas = soup.find_all("meta", attrs={"name": re.compile(r"robots|googlebot", re.I)})
     for m in metas:
@@ -69,14 +66,12 @@ def has_page_nofollow(soup: BeautifulSoup) -> bool:
             return True
     return False
 
-@st.cache_data(show_spinner=False)
 def x_robots_nofollow(headers: dict) -> bool:
     for k, v in headers.items():
         if k.lower() == "x-robots-tag" and v and "nofollow" in v.lower():
             return True
     return False
 
-@st.cache_data(show_spinner=False)
 def is_dofollow_link(rel_values, page_nofollow: bool) -> bool:
     if page_nofollow:
         return False
@@ -103,130 +98,137 @@ def safe_get(url: str):
                 time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF)-1)])
     raise last_exc
 
-uploaded = st.file_uploader("Wgraj CSV", type=["csv"])
-start_btn = st.button("Uruchom sprawdzanie")
+# --- INTERFEJS ---
+uploaded = st.file_uploader("📂 Wgraj CSV lub XLSX", type=["csv", "xlsx"])
+start_btn = st.button("🚀 Uruchom sprawdzanie")
 
 if start_btn:
     if not uploaded:
-        st.warning("Wgraj najpierw CSV z kolumnami page_url i target.")
+        st.warning("Wgraj najpierw plik z kolumnami page_url i target.")
     else:
         # Wczytywanie pliku - obsługa CSV/XLSX, różnych separatorów i kodowań
-from io import StringIO
+        from io import StringIO
 
-df = None
-if uploaded.name.lower().endswith((".xlsx", ".xls")):
-    try:
-        df = pd.read_excel(uploaded)
-    except Exception as e:
-        st.error(f"Nie udało się odczytać XLSX: {e}")
-else:
-    try:
-        uploaded.seek(0)
-        raw = uploaded.read()
-        text = raw.decode("utf-8", errors="ignore")
-        for sep in [",", ";", "	", "|"]:
+        df = None
+        if uploaded.name.lower().endswith((".xlsx", ".xls")):
             try:
-                tmp = pd.read_csv(StringIO(text), sep=sep)
-                if {"page_url", "target"}.issubset(set([c.strip() for c in tmp.columns])):
-                    df = tmp
-                    break
-            except Exception:
-                continue
+                df = pd.read_excel(uploaded)
+            except Exception as e:
+                st.error(f"Nie udało się odczytać XLSX: {e}")
+        else:
+            try:
+                uploaded.seek(0)
+                raw = uploaded.read()
+                text = raw.decode("utf-8", errors="ignore")
+
+                # Sprawdź kilka separatorów - CSV z Excela w PL zwykle ma ';'
+                for sep in [",", ";", "\t", "|"]:
+                    try:
+                        tmp = pd.read_csv(StringIO(text), sep=sep)
+                        if {"page_url", "target"}.issubset(set([c.strip() for c in tmp.columns])):
+                            df = tmp
+                            break
+                    except Exception:
+                        continue
+
+                # Próba automatycznego wykrycia separatora
+                if df is None:
+                    try:
+                        tmp = pd.read_csv(StringIO(text), sep=None, engine="python")
+                        if {"page_url", "target"}.issubset(set([c.strip() for c in tmp.columns])):
+                            df = tmp
+                    except Exception:
+                        pass
+            except Exception as e:
+                st.error(f"Nie udało się wczytać CSV: {e}")
+
         if df is None:
-            try:
-                tmp = pd.read_csv(StringIO(text), sep=None, engine="python")
-                if {"page_url", "target"}.issubset(set([c.strip() for c in tmp.columns])):
-                    df = tmp
-            except Exception:
-                pass
-    except Exception as e:
-        st.error(f"Nie udało się wczytać CSV: {e}")
+            st.error("❌ Nie udało się wczytać pliku. Upewnij się, że ma kolumny: page_url i target.")
+            st.stop()
 
-if df is None:
-    st.stop()  # przerwij dalsze wykonanie, pokaż błąd wyżej
         required = {"page_url", "target"}
         if not required.issubset(set([c.strip() for c in df.columns])):
-            st.error("CSV musi mieć kolumny: page_url, target")
-        else:
-            rows = df.to_dict("records")
-            results = []
-            progress = st.progress(0)
-            status_area = st.empty()
+            st.error("Plik nie ma wymaganych kolumn: page_url, target")
+            st.stop()
 
-            for i, row in enumerate(rows, 1):
-                page_url = str(row.get("page_url", "")).strip()
-                target = str(row.get("target", "")).strip()
-                note = ""
-                try:
-                    resp = safe_get(page_url)
-                    final_url = resp.url
-                    status_code = resp.status_code
-                    content_type = resp.headers.get("Content-Type", "")
-                    if status_code >= 400 or ("text/html" not in content_type.lower() and "xml" not in content_type.lower()):
-                        results.append({
-                            "page_url": page_url,
-                            "final_url": final_url,
-                            "status_code": status_code,
-                            "has_link": False,
-                            "matched_links_count": 0,
-                            "dofollow_links_count": 0,
-                            "link_examples": "",
-                            "page_nofollow": False,
-                            "x_robots_nofollow": "nofollow" in (resp.headers.get("X-Robots-Tag", "").lower()),
-                            "notes": "Non-HTML lub błąd HTTP",
-                        })
-                    else:
-                        soup = BeautifulSoup(resp.text, "lxml")
-                        page_nofollow = has_page_nofollow(soup) or x_robots_nofollow(resp.headers)
+        rows = df.to_dict("records")
+        results = []
+        progress = st.progress(0)
+        status_area = st.empty()
 
-                        anchors = soup.find_all("a", href=True)
-                        matched_links, dofollow_links = [], []
-
-                        base_url = final_url
-                        for a in anchors:
-                            href = a.get("href")
-                            abs_href = urljoin(base_url, href)
-                            if match_target(abs_href, target):
-                                matched_links.append(abs_href)
-                                if is_dofollow_link(a.get("rel"), page_nofollow):
-                                    dofollow_links.append(abs_href)
-
-                        results.append({
-                            "page_url": page_url,
-                            "final_url": final_url,
-                            "status_code": status_code,
-                            "has_link": bool(matched_links),
-                            "matched_links_count": len(matched_links),
-                            "dofollow_links_count": len(dofollow_links),
-                            "link_examples": "; ".join((dofollow_links or matched_links)[:3]),
-                            "page_nofollow": page_nofollow,
-                            "x_robots_nofollow": x_robots_nofollow(resp.headers),
-                            "notes": note,
-                        })
-
-                    status_area.info(f"Przetworzono {i}/{len(rows)}")
-                    progress.progress(int(i/len(rows)*100))
-                    time.sleep(0.5 + random.random()*0.5)
-                except Exception as e:
+        for i, row in enumerate(rows, 1):
+            page_url = str(row.get("page_url", "")).strip()
+            target = str(row.get("target", "")).strip()
+            note = ""
+            try:
+                resp = safe_get(page_url)
+                final_url = resp.url
+                status_code = resp.status_code
+                content_type = resp.headers.get("Content-Type", "")
+                if status_code >= 400 or ("text/html" not in content_type.lower() and "xml" not in content_type.lower()):
                     results.append({
                         "page_url": page_url,
-                        "final_url": "",
-                        "status_code": "",
+                        "final_url": final_url,
+                        "status_code": status_code,
                         "has_link": False,
                         "matched_links_count": 0,
                         "dofollow_links_count": 0,
                         "link_examples": "",
-                        "page_nofollow": "",
-                        "x_robots_nofollow": "",
-                        "notes": f"Błąd: {type(e).__name__}: {e}",
+                        "page_nofollow": False,
+                        "x_robots_nofollow": "nofollow" in (resp.headers.get("X-Robots-Tag", "").lower()),
+                        "notes": "Non-HTML lub błąd HTTP",
+                    })
+                else:
+                    soup = BeautifulSoup(resp.text, "lxml")
+                    page_nofollow = has_page_nofollow(soup) or x_robots_nofollow(resp.headers)
+
+                    anchors = soup.find_all("a", href=True)
+                    matched_links, dofollow_links = [], []
+
+                    base_url = final_url
+                    for a in anchors:
+                        href = a.get("href")
+                        abs_href = urljoin(base_url, href)
+                        if match_target(abs_href, target):
+                            matched_links.append(abs_href)
+                            if is_dofollow_link(a.get("rel"), page_nofollow):
+                                dofollow_links.append(abs_href)
+
+                    results.append({
+                        "page_url": page_url,
+                        "final_url": final_url,
+                        "status_code": status_code,
+                        "has_link": bool(matched_links),
+                        "matched_links_count": len(matched_links),
+                        "dofollow_links_count": len(dofollow_links),
+                        "link_examples": "; ".join((dofollow_links or matched_links)[:3]),
+                        "page_nofollow": page_nofollow,
+                        "x_robots_nofollow": x_robots_nofollow(resp.headers),
+                        "notes": note,
                     })
 
-            out_df = pd.DataFrame(results)
-            st.success("Gotowe. Poniżej podgląd wyników.")
-            st.dataframe(out_df, use_container_width=True)
+                status_area.info(f"Przetworzono {i}/{len(rows)}")
+                progress.progress(int(i/len(rows)*100))
+                time.sleep(0.5 + random.random()*0.5)
+            except Exception as e:
+                results.append({
+                    "page_url": page_url,
+                    "final_url": "",
+                    "status_code": "",
+                    "has_link": False,
+                    "matched_links_count": 0,
+                    "dofollow_links_count": 0,
+                    "link_examples": "",
+                    "page_nofollow": "",
+                    "x_robots_nofollow": "",
+                    "notes": f"Błąd: {type(e).__name__}: {e}",
+                })
 
-            # Plik do pobrania
-            out_csv = out_df.to_csv(index=False).encode("utf-8")
-            st.download_button("Pobierz results_dofollow.csv", data=out_csv, file_name="results_dofollow.csv", mime="text/csv")
+        out_df = pd.DataFrame(results)
+        st.success("✅ Gotowe. Poniżej podgląd wyników.")
+        st.dataframe(out_df, use_container_width=True)
+
+        out_csv = out_df.to_csv(index=False).encode("utf-8")
+        st.download_button("📊 Pobierz results_dofollow.csv", data=out_csv, file_name="results_dofollow.csv", mime="text/csv")
 
 st.caption("Uwaga: aplikacja nie renderuje JS. Linki generowane dynamicznie mogą nie zostać wykryte. Szanuj robots.txt.")
